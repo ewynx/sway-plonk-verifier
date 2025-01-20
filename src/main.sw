@@ -76,8 +76,8 @@ fn reduce_mod(input: b256, q: u256) -> b256 {
 
 impl Proof {
 
-    // beta, gamma
-    fn get_challenges(self, vk: VerificationKey, publicInput: u256) -> [b256;3] {
+    // beta, gamma, alpha, xi, v, u
+    fn get_challenges(self, vk: VerificationKey, publicInput: u256) -> [b256;6] {
         let mut transcript: Bytes = Bytes::new();
 
         ////// BETA
@@ -130,7 +130,35 @@ impl Proof {
         transcript.append(self.proof_Z.bytes());
         let alpha: b256 = reduce_mod(keccak256(transcript), vk.q.x);
         
-        return [beta, gamma, alpha]
+        ////// XI
+        // xi = hash(alpha, proof_T1, proof_T2, proof_T3) mod qs
+        let mut transcript: Bytes = Bytes::new();
+        transcript.append(Bytes::from(alpha));
+        transcript.append(self.proof_T1.bytes());
+        transcript.append(self.proof_T2.bytes());
+        transcript.append(self.proof_T3.bytes());
+        let xi: b256 = reduce_mod(keccak256(transcript), vk.q.x);
+
+        ////// V
+        // v = hash(xi, eval_a, eval_b, eval_c, eval_s1, eval_s2, eval_zw)
+        let mut transcript: Bytes = Bytes::new();
+        transcript.append(Bytes::from(xi));
+        transcript.append(self.eval_a.bytes());
+        transcript.append(self.eval_b.bytes());
+        transcript.append(self.eval_c.bytes());
+        transcript.append(self.eval_s1.bytes());
+        transcript.append(self.eval_s2.bytes());
+        transcript.append(self.eval_zw.bytes());
+        let v: b256 = reduce_mod(keccak256(transcript), vk.q.x);
+
+        ////// U
+        // u = hash(wxi, wxiw)
+        let mut transcript: Bytes = Bytes::new();
+        transcript.append(self.proof_Wxi.bytes());
+        transcript.append(self.proof_Wxiw.bytes());
+        let u: b256 = reduce_mod(keccak256(transcript), vk.q.x);
+
+        return [beta, gamma, alpha, xi, v, u]
     }
 
     pub fn verify(self, verificationKey: VerificationKey) -> bool {
@@ -332,5 +360,14 @@ fn test_challenges_correct() {
   assert(challenges[1] == 0x2ed569abe2d859b264a1a976feb661c36cd14be653582a385d9d6f8c71451057);
   // alpha = 0x2a266571789ec0ac7ccf08b61ccac16c10e217f0c14b87eada1d6c9fe0e11dac
   assert(challenges[2] == 0x2a266571789ec0ac7ccf08b61ccac16c10e217f0c14b87eada1d6c9fe0e11dac);
+  // xi = 5995391859610881302288530115281124419615446175822039475645465975985575599666
+  // 0x0d4145839d4fdb8f5fd1533b384e24940bf7114b39cdd16f163838bbaeec9e32
+  assert(challenges[3] == 0x0d4145839d4fdb8f5fd1533b384e24940bf7114b39cdd16f163838bbaeec9e32);
+  // v = 10198407354444968769398716682395728712793326285861009311402838323692940309090
+  // 0x168c1810dcfcb6d7bbee36e0140593e4382ca849c3d6539eaa1e2ebb84e83262
+  assert(challenges[4] == 0x168c1810dcfcb6d7bbee36e0140593e4382ca849c3d6539eaa1e2ebb84e83262);
+  // u = 14042079368063643215831999264291317274757448834632197026177557057575581413658
+  // 0x1f0b89079ac8c5c8af6b1480eb3ad5661afb28ff7a4096f00422dc675d5c711a
+  assert(challenges[5] == 0x1f0b89079ac8c5c8af6b1480eb3ad5661afb28ff7a4096f00422dc675d5c711a);
 }
 

@@ -26,6 +26,14 @@ pub struct Scalar {
     pub x: u256,
 }
 
+impl Scalar {
+    pub fn bytes(self) -> Bytes {
+      let mut res: Bytes = Bytes::new();
+      res.append(Bytes::from(self.x.to_be_bytes()));
+      return res;
+    }
+}
+
 impl G2Point {
     pub fn new() -> G2Point {
         G2Point { x: [0, 0], y: [0, 0] }
