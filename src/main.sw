@@ -205,36 +205,21 @@ impl Proof {
     }
 
     // r0 := PI(z) − L1(z)α2 − α(¯a + β¯sσ1 + γ)(¯b + β¯sσ2 + γ)(¯c + γ)¯zω,
-    fn calculateR0(self, vk: VerificationKey, 
-      pEval_l1: u256, 
+    fn calculateR0(self, 
+      vk: VerificationKey, 
+      PIz: u256, 
+      pEval_l1: u256,
       alpha: u256,
       alpha_squared: u256,
       beta: u256,
-      gamma: u256,
-      zeta: u256,
-      nu: u256,
-      u: u256) -> u256 {
-        let mut res: u256 = pEval_l1;
-        // for modular subtraction,
-        // can we use 256 integer sub? https://github.com/FuelLabs/fuel-specs/blob/abfd0bb29fab605e0e067165363581232c40e0bb/src/fuel-vm/instruction-set.md#wqop-misc-256-bit-integer-operations
-        // combined with modular addition and 256-bit comparison?
-        /*
-        if a >= b {
-            // No underflow
-            return (a - b) % q;
-        } else {
-            // Add q to avoid underflow
-            return (a + q - b) % q;
-        }
-        */
-
+      gamma: u256) -> u256 {
         ///// SECOND TERM
         // L1(z)α2 
         let mut second_term: u256 = 0;
         asm (rA: second_term, rB: pEval_l1, rC: alpha_squared, rD: vk.q.x) {
           wqmm rA rB rC rD;
         };
-
+        
         ///// THIRD TERM
         // part 1: (¯a + β¯sσ1 + γ)
         
@@ -251,7 +236,6 @@ impl Proof {
         asm (rA: third_term_1, rB: third_term_1, rC: gamma, rD: vk.q.x) {
           wqam rA rB rC rD;
         };
-
 
         // part 2: (¯b + β¯sσ2 + γ)
         let mut third_term_2: u256 = 0;
@@ -289,40 +273,18 @@ impl Proof {
         };
 
         // PI(z) − L1(z)α2 − α(¯a + β¯sσ1 + γ)(¯b + β¯sσ2 + γ)(¯c + γ)¯zω
-        // equals
-        // PI(z) − (L1(z)α2 + α(¯a + β¯sσ1 + γ)(¯b + β¯sσ2 + γ)(¯c + γ)¯zω)
-        let mut last_terms: u256 = 0;
-        asm (rA: last_terms, rB: second_term, rC: third_term, rD: vk.q.x) {
-          wqam rA rB rC rD;
-        };
-        
-        // If PI(z) >= last_terms; do subtraction
-        // else, return PI(z) + (q - last_terms)
+        // PI(z) + (q - L1(z)α2) + (q - α(¯a + β¯sσ1 + γ)(¯b + β¯sσ2 + γ)(¯c + γ)¯zω)
 
-        // Do comparison 
-        // $rA = cmp_op(b,c);
-        // wqcm $rA, $rB, $rC, imm with gte = 5
-        let mut cmp = 0;
-        asm (rA: cmp, rB: pEval_l1, rC: last_terms, rD: 5) {
-          wqam rA rB rC rD;
-        };
-        // if 0 equal, if 1 pEval_l1>last_terms, if 2 pEval_l1<last_terms
+        let mut q_minus_second: u256 = vk.q.x - second_term;
+        let mut q_minus_third: u256 = vk.q.x - third_term;
+
         let mut res: u256 = 0;
-        if cmp == 2 {
-            asm (rA: res, rB: vk.q.x, rC: last_terms, rD: 1) {
-              wqop rA rB rC rD;
-            };
-            asm (rA: res, rB: res, rC: pEval_l1, rD: vk.q.x) {
-              wqam rA rB rC rD;
-            };
-        } else {
-            // mem[$rA,32] = op(b,c);
-            // wqop $rA, $rB, $rC, imm with sub=1
-            asm (rA: res, rB: pEval_l1, rC: last_terms, rD: 1) {
-              wqop rA rB rC rD;
-            };
-        }
-
+        asm (rA: res, rB: PIz, rC: q_minus_second, rD: vk.q.x) {
+          wqam rA rB rC rD;
+        };
+        asm (rA: res, rB: res, rC: q_minus_third, rD: vk.q.x) {
+          wqam rA rB rC rD;
+        };
         return res;
     }
 
@@ -358,6 +320,15 @@ impl Proof {
         asm (rA: alpha_squared, rB: alpha, rC: alpha, rD: vk.q.x) {
           wqmm rA rB rC rD;
         };
+        let R0 = self.calculateR0(
+          vk,
+          PI, 
+          pEval_l1_temp,
+          alpha,
+          alpha_squared,
+          beta,
+          gamma
+        );
         
 
         // Step 9: compute D
@@ -610,4 +581,40 @@ fn test_calculate_PI() {
     // expected value from Solidity contract 0x11c7a56987673d886a2226c9b8a82be88679e261f5b593c0d8b4e9e7b46a9ff6
     // 8042062625007677574890852674071547375005444994579179726790354358024826167286
     assert(PI == 0x11c7a56987673d886a2226c9b8a82be88679e261f5b593c0d8b4e9e7b46a9ff6u256);
+}
+
+fn square_mod(alpha: u256, q: u256) -> u256 {
+    let mut alpha_squared = 0;
+    asm (rA: alpha_squared, rB: alpha, rC: alpha, rD: q) {
+      wqmm rA rB rC rD;
+    };
+    return alpha_squared; 
+
+}
+
+#[test]
+fn test_calculate_R0() {
+    let proof = get_test_proof();
+    let vk = get_test_vk();
+    let pEval_l1 = 0x0f54b0a27de056bddb97b2c04c514603caba86c9c0a2569d829216adfc954077u256;
+    let PIz = 0x11c7a56987673d886a2226c9b8a82be88679e261f5b593c0d8b4e9e7b46a9ff6u256;
+    // beta = 9039157458725624756817570435850936750907480212061850632293870469811624017805
+    let beta = 0x13fbfb586deb4d87a24218bc40e77153fe065b3c8401a0ab729130bb9000ff8du256;
+    // gamma = 21183458777034922119798033548885077621097219042378882580873372273104224850007
+    let gamma = 0x2ed569abe2d859b264a1a976feb661c36cd14be653582a385d9d6f8c71451057u256;
+    // alpha = 0x2a266571789ec0ac7ccf08b61ccac16c10e217f0c14b87eada1d6c9fe0e11dac
+    let alpha = 0x2a266571789ec0ac7ccf08b61ccac16c10e217f0c14b87eada1d6c9fe0e11dacu256;
+    let alpha_squared: u256 = square_mod(alpha, vk.q.x);
+    
+    let R0 = proof.calculateR0(
+          vk,
+          PIz,
+          pEval_l1,
+          alpha,
+          alpha_squared,
+          beta,
+          gamma
+        );
+
+    assert(R0 == 0x250144c24fc35df3f70f144497bea4b7efebe7f0d1d73794af958bca5eaba559u256);
 }
