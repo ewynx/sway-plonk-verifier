@@ -191,7 +191,142 @@ impl Proof {
       return (num, denom);
     }
       
+    // In this code, l = 1
+    // w_1*L_1(zeta), 
+    // where w_1 is the first public signal
+    // and L_1(zeta)=pEval_l1
+    fn calculatePI(self, vk: VerificationKey, pEval_l1: u256, publicInput: u256) -> u256 {
+        let mut res: u256 = 0;
+        // pEval_l1*publicInput mod q
+        asm (rA: res, rB: pEval_l1, rC: publicInput, rD: vk.q.x) {
+            wqmm rA rB rC rD;
+        };
+        return res;
+    }
 
+    // r0 := PI(z) − L1(z)α2 − α(¯a + β¯sσ1 + γ)(¯b + β¯sσ2 + γ)(¯c + γ)¯zω,
+    fn calculateR0(self, vk: VerificationKey, 
+      pEval_l1: u256, 
+      alpha: u256,
+      alpha_squared: u256,
+      beta: u256,
+      gamma: u256,
+      zeta: u256,
+      nu: u256,
+      u: u256) -> u256 {
+        let mut res: u256 = pEval_l1;
+        // for modular subtraction,
+        // can we use 256 integer sub? https://github.com/FuelLabs/fuel-specs/blob/abfd0bb29fab605e0e067165363581232c40e0bb/src/fuel-vm/instruction-set.md#wqop-misc-256-bit-integer-operations
+        // combined with modular addition and 256-bit comparison?
+        /*
+        if a >= b {
+            // No underflow
+            return (a - b) % q;
+        } else {
+            // Add q to avoid underflow
+            return (a + q - b) % q;
+        }
+        */
+
+        ///// SECOND TERM
+        // L1(z)α2 
+        let mut second_term: u256 = 0;
+        asm (rA: second_term, rB: pEval_l1, rC: alpha_squared, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+
+        ///// THIRD TERM
+        // part 1: (¯a + β¯sσ1 + γ)
+        
+        // Step 1: third_term_1 =  β¯sσ1
+        let mut third_term_1: u256 = 0;
+        asm (rA: third_term_1, rB: beta, rC: self.eval_s1, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        // Step 2: third_term_1 =  ¯a + β¯sσ1
+        asm (rA: third_term_1, rB: self.eval_a, rC: third_term_1, rD: vk.q.x) {
+          wqam rA rB rC rD;
+        };
+        // Step 3: third_term_1 = ¯a + β¯sσ1 + γ
+        asm (rA: third_term_1, rB: third_term_1, rC: gamma, rD: vk.q.x) {
+          wqam rA rB rC rD;
+        };
+
+
+        // part 2: (¯b + β¯sσ2 + γ)
+        let mut third_term_2: u256 = 0;
+        asm (rA: third_term_2, rB: beta, rC: self.eval_s2, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        asm (rA: third_term_2, rB: self.eval_b, rC: third_term_2, rD: vk.q.x) {
+          wqam rA rB rC rD;
+        };
+        asm (rA: third_term_2, rB: third_term_2, rC: gamma, rD: vk.q.x) {
+          wqam rA rB rC rD;
+        };
+
+        // part 3: (¯c + γ)
+        let mut third_term_3: u256 = 0;
+        asm (rA: third_term_3, rB: self.eval_c, rC: gamma, rD: vk.q.x) {
+          wqam rA rB rC rD;
+        };
+
+        // α(¯a + β¯sσ1 + γ)(¯b + β¯sσ2 + γ)(¯c + γ)¯zω
+        let mut temp0: u256 = 0;
+        asm (rA: temp0, rB: alpha, rC: third_term_1, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        let mut temp1: u256 = 0;
+        asm (rA: temp1, rB: third_term_2, rC: third_term_3, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        let mut third_term: u256 = 0;
+        asm (rA: third_term, rB: self.eval_zw, rC: temp0, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        asm (rA: third_term, rB: third_term, rC: temp1, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+
+        // PI(z) − L1(z)α2 − α(¯a + β¯sσ1 + γ)(¯b + β¯sσ2 + γ)(¯c + γ)¯zω
+        // equals
+        // PI(z) − (L1(z)α2 + α(¯a + β¯sσ1 + γ)(¯b + β¯sσ2 + γ)(¯c + γ)¯zω)
+        let mut last_terms: u256 = 0;
+        asm (rA: last_terms, rB: second_term, rC: third_term, rD: vk.q.x) {
+          wqam rA rB rC rD;
+        };
+        
+        // If PI(z) >= last_terms; do subtraction
+        // else, return PI(z) + (q - last_terms)
+
+        // Do comparison 
+        // $rA = cmp_op(b,c);
+        // wqcm $rA, $rB, $rC, imm with gte = 5
+        let mut cmp = 0;
+        asm (rA: cmp, rB: pEval_l1, rC: last_terms, rD: 5) {
+          wqam rA rB rC rD;
+        };
+        // if 0 equal, if 1 pEval_l1>last_terms, if 2 pEval_l1<last_terms
+        let mut res: u256 = 0;
+        if cmp == 2 {
+            asm (rA: res, rB: vk.q.x, rC: last_terms, rD: 1) {
+              wqop rA rB rC rD;
+            };
+            asm (rA: res, rB: res, rC: pEval_l1, rD: vk.q.x) {
+              wqam rA rB rC rD;
+            };
+        } else {
+            // mem[$rA,32] = op(b,c);
+            // wqop $rA, $rB, $rC, imm with sub=1
+            asm (rA: res, rB: pEval_l1, rC: last_terms, rD: 1) {
+              wqop rA rB rC rD;
+            };
+        }
+
+        return res;
+    }
+
+    // In this case, public input has length 1
     pub fn verify(self, vk: VerificationKey, publicInput: u256) -> bool {
         // 1. TODO check fields
         // 2. TODO check fields
@@ -209,6 +344,27 @@ impl Proof {
         // Step 5&6: compute w(z^n-1)/n*(z-w)
         let w: u256 = 1;
         let pEval_l1 = self.calculateLagrange(vk, zeta, w);
+
+        // Step 7: compute PI (public input polynomial evaluation)
+        // sum(w_i*L_i(zeta)) 
+        // zeta = xi in Solidity Verifier
+        // temporarily, take hardcoded value, until inversion has been implemented
+        let pEval_l1_temp = u256::from(0x0f54b0a27de056bddb97b2c04c514603caba86c9c0a2569d829216adfc954077);
+        let PI = self.calculatePI(vk, pEval_l1_temp, publicInput);
+
+        // Step 8: compute R0
+        let mut alpha_squared: u256 = 0;
+        // mem[$rA,32] = (b*c)%d
+        asm (rA: alpha_squared, rB: alpha, rC: alpha, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        
+
+        // Step 9: compute D
+
+        // Step 10: compute F
+
+        // Step 11: compute E
 
         return false;
     }
@@ -434,3 +590,24 @@ fn test_calculate_lagrange() {
     
 }
 
+// This test fails, the Solidity code actually does something slightly different than the paper
+// should be pEval_l1*pub[0] mod q
+// Solidity code does 0-(pEval_l1*pub[0]) mod q
+// #[test]
+fn test_calculate_PI() {
+    let proof = get_test_proof();
+    let vk = get_test_vk();
+    // q= 
+    // 21888242871839275222246405745257275088548364400416034343698204186575808495617
+    let publicInput: u256 = 0x110d778eaf8b8ef7ac10f8ac239a14df0eb292a8d1b71340d527b26301a9ab08u256;
+    let pEval_l1 = 0x0f54b0a27de056bddb97b2c04c514603caba86c9c0a2569d829216adfc954077u256;
+    let PI = proof.calculatePI(vk, pEval_l1, publicInput);
+    // log(PI);
+    // 13846180246831597647355553071185727713542919405836854616907849828550982328331
+    // 0x1e9ca90959ca62a14e2e1eecc8d92c74a1ba05e68403dcd06b2d0bac3b95600b
+    // 16^^1e9ca90959ca62a14e2e1eecc8d92c74a1ba05e68403dcd06b2d0bac3b95600b
+
+    // expected value from Solidity contract 0x11c7a56987673d886a2226c9b8a82be88679e261f5b593c0d8b4e9e7b46a9ff6
+    // 8042062625007677574890852674071547375005444994579179726790354358024826167286
+    assert(PI == 0x11c7a56987673d886a2226c9b8a82be88679e261f5b593c0d8b4e9e7b46a9ff6u256);
+}
