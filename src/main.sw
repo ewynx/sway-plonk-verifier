@@ -37,7 +37,7 @@ struct VerificationKey {
     pub k2: Scalar,      // k2 (permutation factor)
 
     // Circuit metadata
-    pub n: u32,          // Circuit size
+    pub n: u32,          // Circuit size, power of 2
     pub nPublic: u16,    // Number of public inputs
     pub nLagrange: u16,  // Number of Lagrange polynomials
 
@@ -76,7 +76,7 @@ fn reduce_mod(input: b256, q: u256) -> b256 {
 
 impl Proof {
 
-    // beta, gamma, alpha, xi, v, u
+    // beta, gamma, alpha, xi (=zeta), v, u
     fn get_challenges(self, vk: VerificationKey, publicInput: u256) -> [b256;6] {
         let mut transcript: Bytes = Bytes::new();
 
@@ -130,7 +130,7 @@ impl Proof {
         transcript.append(self.proof_Z.bytes());
         let alpha: b256 = reduce_mod(keccak256(transcript), vk.q.x);
         
-        ////// XI
+        ////// XI (zeta in Plonk paper)
         // xi = hash(alpha, proof_T1, proof_T2, proof_T3) mod qs
         let mut transcript: Bytes = Bytes::new();
         transcript.append(Bytes::from(alpha));
@@ -161,12 +161,55 @@ impl Proof {
         return [beta, gamma, alpha, xi, v, u]
     }
 
-    pub fn verify(self, verificationKey: VerificationKey) -> bool {
-      // 1. TODO check fields
-      // 2. TODO check fields
-      // 3. TODO check fields
-      // Step 4: Recompute challenges beta, gamma, alpha, zeta, nu, and u in the field F
-      // (β, γ, α, z, v, u)
+    // TODO calculate inverse to finish up the value
+    fn calculateLagrange(self, vk: VerificationKey, zeta: u256, w: u256) -> (u256, u256) {
+      // n(zeta-w) mod q
+      let mut denom: u256 = 0;
+      let temp = zeta - w;
+      let n = u256::from(vk.n);
+      // mem[$rA,32] = (b*c)%d
+      asm (rA: denom, rB: temp, rC: n, rD: vk.q.x) {
+        wqmm rA rB rC rD;
+      };
+      
+      // 2. zeta^n-w, where in practice n is a power of 2
+      let power = 11; // this is specific to the n (vk.n)
+      let mut i = 0;
+      let mut num: u256 = zeta;
+      while i < power {
+          // mem[$rA,32] = (b*c)%d
+          asm (rA: num, rB: num, rC: num, rD: vk.q.x) {
+            wqmm rA rB rC rD;
+          };
+
+          i = i + 1;
+      }
+      num = num - w;
+
+      // TODO invert denom
+      // return (zetaˆn-w) / n*(zeta-w)
+      return (num, denom);
+    }
+      
+
+    pub fn verify(self, vk: VerificationKey, publicInput: u256) -> bool {
+        // 1. TODO check fields
+        // 2. TODO check fields
+        // 3. TODO check fields
+        // Step 4: Recompute challenges beta, gamma, alpha, zeta, nu, and u in the field F
+        // (β, γ, α, z, v, u)
+        let challenges = self.get_challenges(vk, publicInput);
+        let beta = u256::from(challenges[0]);
+        let gamma = u256::from(challenges[1]);
+        let alpha = u256::from(challenges[2]);
+        let zeta = u256::from(challenges[3]);
+        let nu = u256::from(challenges[4]);
+        let u = u256::from(challenges[5]);
+
+        // Step 5&6: compute w(z^n-1)/n*(z-w)
+        let w: u256 = 1;
+        let pEval_l1 = self.calculateLagrange(vk, zeta, w);
+
         return false;
     }
 }
@@ -347,7 +390,6 @@ fn get_test_vk() -> VerificationKey {
     return vk;
 }
 
-
 #[test]
 fn test_challenges_correct() {
   let proof = get_test_proof();
@@ -369,5 +411,26 @@ fn test_challenges_correct() {
   // u = 14042079368063643215831999264291317274757448834632197026177557057575581413658
   // 0x1f0b89079ac8c5c8af6b1480eb3ad5661afb28ff7a4096f00422dc675d5c711a
   assert(challenges[5] == 0x1f0b89079ac8c5c8af6b1480eb3ad5661afb28ff7a4096f00422dc675d5c711a);
+}
+
+#[test]
+fn test_calculate_lagrange() {
+    let proof = get_test_proof();
+    let vk = get_test_vk();
+    let zeta: u256 = u256::from(0x0d4145839d4fdb8f5fd1533b384e24940bf7114b39cdd16f163838bbaeec9e32);
+    let w: u256 = 1;
+    
+    // Returns num and denom separately, since inversion has not been implemented yet
+    let (num, denom): (u256, u256) = proof.calculateLagrange(vk, zeta, w);
+    // n(zeta-1) mod q: 0x2ec0819de24e1fbb5b015a8726335497c6fe3b4428e53aed437ca9da64f185d0
+    assert(denom == u256::from(0x2ec0819de24e1fbb5b015a8726335497c6fe3b4428e53aed437ca9da64f185d0));
+    // zeta^n - 1 mod q: 0x146415a35241c3305dc90bccb7aae026960aa78d380828893c63a7eb0ea81d97
+    assert(num == u256::from(0x146415a35241c3305dc90bccb7aae026960aa78d380828893c63a7eb0ea81d97));
+
+    // TODO add inversion and compute final value
+    // let pEval_l1: u256 = proof.calculateLagrange(vk, zeta, w);
+    // let expected_pEval_l1: u256 = u256::from(0x0e403813acb2c357cb815b0cf271a6f92851f0444081051ea884eb47fa36e9dd);
+    // assert(pEval_l1 == expected_pEval_l1);
+    
 }
 
