@@ -116,11 +116,11 @@ impl G1Point {
         }
     }
 
-    pub fn point_add(p1: G1Point, p2: G1Point) -> G1Point {
+    pub fn point_add(self, p2: G1Point) -> G1Point {
         let mut input: [u8; 128] = [0; 128];
         let mut output: [u8; 64] = [0; 64];
 
-        let mut p1_bytes: [u8; 64] = p1.to_bytes();
+        let mut p1_bytes: [u8; 64] = self.to_bytes();
         let mut p2_bytes: [u8; 64] = p2.to_bytes();
 
         let mut i = 0;
@@ -131,7 +131,7 @@ impl G1Point {
         }
 
         let curve_id: u32 = 0;
-        let op_type: u32 = 0;
+        let op_type: u32 = 0;//point addition
 
         // ecc addition opcode
         // https://github.com/FuelLabs/fuel-specs/blob/abfd0bb29fab605e0e067165363581232c40e0bb/src/fuel-vm/instruction-set.md#ecop-elliptic-curve-point-operation
@@ -142,11 +142,11 @@ impl G1Point {
         G1Point::from_bytes(output)
     }
 
-    pub fn scalar_mul(p: G1Point, s: Scalar) -> G1Point {
+    pub fn scalar_mul(self, s: Scalar) -> G1Point {
         let mut input: [u8; 96] = [0; 96];
         let mut output: [u8; 64] = [0; 64];
 
-        let mut p_bytes: [u8; 64] = p.to_bytes();
+        let mut p_bytes: [u8; 64] = self.to_bytes();
         let mut s_bytes: [u8; 32] = s.x.to_be_bytes();
 
         // preparing inputs
