@@ -203,7 +203,7 @@ impl G1Point {
     }
 }
 
-fn check_point_belongs_to_bn128_curve(p: G1Point) -> bool {
+pub fn check_point_belongs_to_bn128_curve(p: G1Point) -> bool {
 
     let QF: u256 = 0x30644E72E131A029B85045B68181585D97816A916871CA8D3C208C16D87CFD47u256;
 

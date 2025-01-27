@@ -1,12 +1,15 @@
 contract;
-
 mod lib;
-use lib::{G1Point, G2Point, Scalar};
+use lib::{G1Point, G2Point, Scalar, check_point_belongs_to_bn128_curve};
 use std::hash::Hash;
 use std::hash::{keccak256, sha256};
 use std::bytes::Bytes;
 use std::bytes_conversions::u256::*;
 
+// Plonk Verifier
+// Follows Snarkjs Solidity implementation and additional notes from original Plonk paper
+
+const ZERO: u256 = 0;
 
 struct VerificationKey {
     // Scalars
@@ -45,6 +48,9 @@ struct VerificationKey {
     pub X2: G2Point,     // X2 point for additional checks
 }
 
+pub fn is_field(val: Scalar, q: u256) -> bool {
+  val.x < q
+}
 
 struct Proof {
   pub proof_A: G1Point,
@@ -62,16 +68,6 @@ struct Proof {
   pub eval_s1: Scalar,
   pub eval_s2: Scalar,
   pub eval_zw: Scalar,
-}
-
-fn reduce_mod(input: b256, q: u256) -> b256 {
-    let mut temp: u256 = u256::from(input);
-    // TODO is there a mod function?
-    while temp >= q {
-      temp -= q; 
-    }
-    let output: b256 = b256::from(temp);
-    output
 }
 
 impl Proof {
@@ -114,13 +110,19 @@ impl Proof {
         // 64 bytes of pC
         transcript.append(self.proof_C.bytes());
         // beta = hash(transcript) mod q
-        let beta: b256 = reduce_mod(keccak256(transcript), vk.q.x);
+        let beta: b256 = keccak256(transcript);
+        asm (rA: beta, rC: ZERO, rD: vk.q.x) {
+            wqam rA rA rC rD;
+        };
         
         ////// GAMMA
         // gamma = hash(beta) mod q
         // Note: this follows snarkjs Plonk verifier beta = hash(transcript) and gamma = hash(beta)
         // While the paper does beta = hash(transcript, 0) and gamma=hash(transcript,1))
-        let gamma: b256 = reduce_mod(keccak256(beta), vk.q.x);
+        let gamma: b256 = keccak256(beta);
+        asm (rA: gamma, rC: ZERO, rD: vk.q.x) {
+            wqam rA rA rC rD;
+        };
         
         ////// ALPHA
         // alpha = hash(beta, gamma, proof_Z) mod q
@@ -128,16 +130,22 @@ impl Proof {
         transcript.append(Bytes::from(beta));
         transcript.append(Bytes::from(gamma));
         transcript.append(self.proof_Z.bytes());
-        let alpha: b256 = reduce_mod(keccak256(transcript), vk.q.x);
+        let alpha: b256 = keccak256(transcript);
+        asm (rA: alpha, rC: ZERO, rD: vk.q.x) {
+            wqam rA rA rC rD;
+        };
         
-        ////// XI (zeta in Plonk paper)
+        ////// XI (xi in Plonk paper)
         // xi = hash(alpha, proof_T1, proof_T2, proof_T3) mod qs
         let mut transcript: Bytes = Bytes::new();
         transcript.append(Bytes::from(alpha));
         transcript.append(self.proof_T1.bytes());
         transcript.append(self.proof_T2.bytes());
         transcript.append(self.proof_T3.bytes());
-        let xi: b256 = reduce_mod(keccak256(transcript), vk.q.x);
+        let xi: b256 = keccak256(transcript);
+        asm (rA: xi, rC: ZERO, rD: vk.q.x) {
+            wqam rA rA rC rD;
+        };
 
         ////// V
         // v = hash(xi, eval_a, eval_b, eval_c, eval_s1, eval_s2, eval_zw)
@@ -149,64 +157,71 @@ impl Proof {
         transcript.append(self.eval_s1.bytes());
         transcript.append(self.eval_s2.bytes());
         transcript.append(self.eval_zw.bytes());
-        let v: b256 = reduce_mod(keccak256(transcript), vk.q.x);
+        let v: b256 = keccak256(transcript);
+        asm (rA: v, rC: ZERO, rD: vk.q.x) {
+            wqam rA rA rC rD;
+        };
 
         ////// U
         // u = hash(wxi, wxiw)
         let mut transcript: Bytes = Bytes::new();
         transcript.append(self.proof_Wxi.bytes());
         transcript.append(self.proof_Wxiw.bytes());
-        let u: b256 = reduce_mod(keccak256(transcript), vk.q.x);
+        let u: b256 = keccak256(transcript);
+        asm (rA: u, rC: ZERO, rD: vk.q.x) {
+            wqam rA rA rC rD;
+        };
 
         return [beta, gamma, alpha, xi, v, u]
     }
 
     // TODO calculate inverse to finish up the value
-    // num, denom, zeta^n
-    fn calculateLagrange(self, vk: VerificationKey, zeta: u256, w: u256) -> (u256, u256, u256) {
-      // n(zeta-w) mod q
+    // num, denom, xi^n
+    fn calculateLagrange(self, vk: VerificationKey, xi: u256, w: u256) -> (u256, u256, u256) {
+      // n(xi-w) mod q
       let mut denom: u256 = 0;
-      let temp = zeta - w;
+      let temp = xi - w;
       let n = u256::from(vk.n);
       // mem[$rA,32] = (b*c)%d
       asm (rA: denom, rB: temp, rC: n, rD: vk.q.x) {
         wqmm rA rB rC rD;
       };
       
-      // 2. zeta^n-w, where in practice n is a power of 2
+      // 2. xi^n-w, where in practice n is a power of 2
       let power = 11; // this is specific to the n (vk.n)
       let mut i = 0;
-      let mut zeta_pow_n: u256 = zeta;
+      let mut xi_pow_n: u256 = xi;
       while i < power {
           // mem[$rA,32] = (b*c)%d
-          asm (rA: zeta_pow_n, rB: zeta_pow_n, rC: zeta_pow_n, rD: vk.q.x) {
+          asm (rA: xi_pow_n, rB: xi_pow_n, rC: xi_pow_n, rD: vk.q.x) {
             wqmm rA rB rC rD;
           };
 
           i = i + 1;
       }
-      let num: u256 = zeta_pow_n - w;
+      let num: u256 = xi_pow_n - w;
 
       // TODO invert denom
-      // return (zetaˆn-w) / n*(zeta-w), zeta_pow_n
-      return (num, denom, zeta_pow_n);
+      // return (xiˆn-w) / n*(xi-w), xi_pow_n
+      return (num, denom, xi_pow_n);
     }
       
     // In this code, l = 1
-    // w_1*L_1(zeta), 
+    // w_1*L_1(xi), 
     // where w_1 is the first public signal
-    // and L_1(zeta)=pEval_l1
+    // and L_1(xi)=pEval_l1
     fn calculatePI(self, vk: VerificationKey, pEval_l1: u256, publicInput: u256) -> u256 {
         let mut res: u256 = 0;
         // pEval_l1*publicInput mod q
         asm (rA: res, rB: pEval_l1, rC: publicInput, rD: vk.q.x) {
             wqmm rA rB rC rD;
         };
-        return res;
+        // Same as in Solidity code, negate PI
+        return vk.q.x - res;
     }
 
     // r0 := PI(z) − L1(z)α2 − α(¯a + β¯sσ1 + γ)(¯b + β¯sσ2 + γ)(¯c + γ)¯zω,
-    fn calculateR0(self, 
+    fn calculateR0(self,
       vk: VerificationKey, 
       PIz: u256, 
       pEval_l1: u256,
@@ -290,14 +305,14 @@ impl Proof {
     }
 
     fn calculateD(self,
-      vk: VerificationKey,
+      vk: VerificationKey, 
       pEval_l1: u256,
       alpha: u256,
       alpha_squared: u256,
       beta: u256,
       gamma: u256,
-      zeta: u256, // xi
-      zeta_pow_n: u256, // xi^n
+      xi: u256, // xi
+      xi_pow_n: u256, // xi^n
       v: u256,
       u: u256) -> G1Point {
 
@@ -322,12 +337,12 @@ impl Proof {
 
         //// TERM 2
         // (¯a + βz + γ)
-        let mut betazeta: u256 = 0;
-        asm (rA: betazeta, rB: beta, rC: zeta, rD: vk.q.x) {
+        let mut betaxi: u256 = 0;
+        asm (rA: betaxi, rB: beta, rC: xi, rD: vk.q.x) {
           wqmm rA rB rC rD;
         };
         let mut val1: u256 = 0;
-        asm (rA: val1, rB: betazeta, rC: self.eval_a, rD: vk.q.x) {
+        asm (rA: val1, rB: betaxi, rC: self.eval_a, rD: vk.q.x) {
           wqam rA rB rC rD;
         };
         asm (rA: val1, rB: val1, rC: gamma, rD: vk.q.x) {
@@ -336,7 +351,7 @@ impl Proof {
 
         // (¯b + βk1z + γ)
         let mut val2: u256 = 0;
-        asm (rA: val2, rB: betazeta, rC: vk.k1, rD: vk.q.x) {
+        asm (rA: val2, rB: betaxi, rC: vk.k1, rD: vk.q.x) {
           wqmm rA rB rC rD;
         };
         asm (rA: val2, rB: val2, rC: self.eval_b, rD: vk.q.x) {
@@ -348,7 +363,7 @@ impl Proof {
 
         // (¯c + βk2z + γ)
         let mut val3: u256 = 0;
-        asm (rA: val3, rB: betazeta, rC: vk.k2, rD: vk.q.x) {
+        asm (rA: val3, rB: betaxi, rC: vk.k2, rD: vk.q.x) {
           wqmm rA rB rC rD;
         };
         asm (rA: val3, rB: val3, rC: self.eval_c, rD: vk.q.x) {
@@ -433,20 +448,20 @@ impl Proof {
 
         //// TERM 4
         let mut point_term4: G1Point = self.proof_T1;
-        // zeta^n[t_mid]1
-        let mut temp_point: G1Point = self.proof_T2.scalar_mul(Scalar{ x:zeta_pow_n });
+        // xi^n[t_mid]1
+        let mut temp_point: G1Point = self.proof_T2.scalar_mul(Scalar{ x:xi_pow_n });
         point_term4 = point_term4.point_add(temp_point);
         
-        // zeta^2n
-        asm (rA: val2, rB: zeta_pow_n, rC: zeta_pow_n, rD: vk.q.x) {
+        // xi^2n
+        asm (rA: val2, rB: xi_pow_n, rC: xi_pow_n, rD: vk.q.x) {
           wqmm rA rB rC rD;
         };
-        // zeta^2n · [t_hi]1
+        // xi^2n · [t_hi]1
         temp_point = self.proof_T3.scalar_mul(Scalar{ x:val2 });
         point_term4 = point_term4.point_add(temp_point);
 
         // ZH(z)([tlo]1 + zn · [tmid]1 + z2n · [thi]1)
-        point_term4 = point_term4.scalar_mul(Scalar {x: zeta_pow_n - 1 });
+        point_term4 = point_term4.scalar_mul(Scalar {x: xi_pow_n - 1 });
 
         // negate point term3
         let neg_y_3: u256 = vk.qf.x - point_term3.y;
@@ -468,28 +483,123 @@ impl Proof {
         return res;
     }
 
+    fn calculateF(self,
+      vk: VerificationKey, 
+      v: Scalar,
+      v2: Scalar,
+      v3: Scalar,
+      v4: Scalar,
+      v5: Scalar,
+      D: G1Point
+    ) -> G1Point {
+        // D + v · [a]1
+        let mut temp: G1Point = self.proof_A.scalar_mul(v);
+        let mut res: G1Point = D.point_add(temp);
+        // v2 · [b]1
+        temp = self.proof_B.scalar_mul(v2);
+        res = res.point_add(temp);
+        // v3 · [c]1
+        temp = self.proof_C.scalar_mul(v3);
+        res = res.point_add(temp);
+        // v4 · [sσ1]1
+        temp = vk.S1.scalar_mul(v4);
+        res = res.point_add(temp);
+        // v5 · [sσ2]1
+        temp = vk.S2.scalar_mul(v5);
+        res = res.point_add(temp);
+        return res; 
+    }
+
+    fn calculateE(self,
+      vk: VerificationKey, 
+      r0: u256,
+      u: Scalar,
+      v: Scalar,
+      v2: Scalar,
+      v3: Scalar,
+      v4: Scalar,
+      v5: Scalar,
+      ) -> G1Point {
+        // −r0 + v¯a + v2¯b + v3¯c + v4¯sσ1 + v5¯sσ2 + u¯zω
+        // q-r0
+        let mut acc_scalar: u256 = vk.q.x - r0;
+        let mut temp: u256 = 0;
+        asm (rA: temp, rB: v, rC: self.eval_a, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        acc_scalar += temp;
+        asm (rA: temp, rB: v2, rC: self.eval_b, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        acc_scalar += temp;
+        asm (rA: temp, rB: v3, rC: self.eval_c, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        acc_scalar += temp;
+        asm (rA: temp, rB: v4, rC: self.eval_s1, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        acc_scalar += temp;
+        asm (rA: temp, rB: v5, rC: self.eval_s2, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        acc_scalar += temp;
+        asm (rA: temp, rB: u, rC: self.eval_zw, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        acc_scalar += temp;
+        let res = vk.G1.scalar_mul(Scalar { x: acc_scalar });
+        return res; 
+    }
+
     // In this case, public input has length 1
     pub fn verify(self, vk: VerificationKey, publicInput: u256) -> bool {
-        // 1. TODO check fields
-        // 2. TODO check fields
-        // 3. TODO check fields
-        // Step 4: Recompute challenges beta, gamma, alpha, zeta, nu, and u in the field F
+        // 1. Check points are on curve
+        // ([a]1, [b]1, [c]1, [z]1, [tlo]1, [tmid]1, [thi]1, [Wz]1, [Wzω]1) ∈ G91
+        if !(check_point_belongs_to_bn128_curve(self.proof_A)
+            && check_point_belongs_to_bn128_curve(self.proof_B)
+            && check_point_belongs_to_bn128_curve(self.proof_C)
+            && check_point_belongs_to_bn128_curve(self.proof_Z)
+            && check_point_belongs_to_bn128_curve(self.proof_T1)
+            && check_point_belongs_to_bn128_curve(self.proof_T2)
+            && check_point_belongs_to_bn128_curve(self.proof_T3)
+            && check_point_belongs_to_bn128_curve(self.proof_Wxi)
+            && check_point_belongs_to_bn128_curve(self.proof_Wxiw)) {
+            return false;
+        }
+        // 2. Validate (¯a, ¯b, ¯c,¯sσ1,¯sσ2, ¯zω) ∈ F6 (scalar field, q)
+        if !(is_field(self.eval_a, vk.q.x)
+            && is_field(self.eval_b, vk.q.x)
+            && is_field(self.eval_c, vk.q.x)
+            && is_field(self.eval_s1, vk.q.x)
+            && is_field(self.eval_s2, vk.q.x)
+            && is_field(self.eval_zw, vk.q.x)) {
+          return false; 
+        }
+        // 3. Validate public input 
+        // (wi)i∈[ℓ] ∈ Fℓ
+        if !is_field(Scalar {x: publicInput}, vk.q.x) {
+          return false; 
+        }
+        // Step 4: Recompute challenges beta, gamma, alpha, xi, v, and u in the field F
         // (β, γ, α, z, v, u)
         let challenges = self.get_challenges(vk, publicInput);
         let beta = u256::from(challenges[0]);
         let gamma = u256::from(challenges[1]);
         let alpha = u256::from(challenges[2]);
-        let zeta = u256::from(challenges[3]);
-        let nu = u256::from(challenges[4]);
+        let xi = u256::from(challenges[3]);
+        let v = u256::from(challenges[4]);
         let u = u256::from(challenges[5]);
 
         // Step 5&6: compute w(z^n-1)/n*(z-w)
         let w: u256 = 1;
-        let (num, denom, zeta_pow_n) = self.calculateLagrange(vk, zeta, w);
+        let (num, denom, xi_pow_n) = self.calculateLagrange(vk, xi, w);
 
         // Step 7: compute PI (public input polynomial evaluation)
-        // sum(w_i*L_i(zeta)) 
+        // sum(w_i*L_i(xi)) 
+        // Following Solidity implementation -sum(w_i*L_i(xi)) 
         // zeta = xi in Solidity Verifier
+        // TODO
         // temporarily, take hardcoded value, until inversion has been implemented
         let pEval_l1_temp = u256::from(0x0f54b0a27de056bddb97b2c04c514603caba86c9c0a2569d829216adfc954077);
         let PI = self.calculatePI(vk, pEval_l1_temp, publicInput);
@@ -501,7 +611,7 @@ impl Proof {
           wqmm rA rB rC rD;
         };
         let R0 = self.calculateR0(
-          vk,
+          vk, 
           PI, 
           pEval_l1_temp,
           alpha,
@@ -512,23 +622,105 @@ impl Proof {
         
         // Step 9: compute D
         let D = self.calculateD(
-          vk,
+          vk, 
           pEval_l1_temp,
           alpha,
           alpha_squared,
           beta,
           gamma,
-          zeta,
-          zeta_pow_n,
-          nu,
+          xi,
+          xi_pow_n,
+          v,
           u
         );
 
         // Step 10: compute F
+        let mut v2: u256 = 0;
+        let mut v3: u256 = 0;
+        let mut v4: u256 = 0;
+        let mut v5: u256 = 0;
+        asm (rA: v2, rB: v, rC: v, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        asm (rA: v3, rB: v2, rC: v, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        asm (rA: v4, rB: v3, rC: v, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        asm (rA: v5, rB: v4, rC: v, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        let v_scalar = Scalar { x: v };
+        let v2_scalar = Scalar { x: v2 };
+        let v3_scalar = Scalar { x: v3 };
+        let v4_scalar = Scalar { x: v4 };
+        let v5_scalar = Scalar { x: v5 };
+        let F: G1Point = self.calculateF(vk, v_scalar, v2_scalar, v3_scalar, v4_scalar, v5_scalar, D);
 
         // Step 11: compute E
+        let u_scalar = Scalar { x: u };
+        let E: G1Point = self.calculateE(vk, R0, u_scalar, v_scalar, v2_scalar, v3_scalar, v4_scalar, v5_scalar);
 
-        return false;
+        // Step 12: check pairing
+        // A1 = [Wz]1 + u · [Wzω]1
+        let mut a1: G1Point = self.proof_Wxiw.scalar_mul(u_scalar);
+        a1 = a1.point_add(self.proof_Wxi);
+        let a1_neg = G1Point {
+          x: a1.x,
+          y: (vk.qf.x - a1.y) % vk.qf.x
+        };
+
+        // B1 = z · [Wz]1 + uzω · [Wzω]1 + [F]1 − [E]1
+        let mut b1: G1Point = self.proof_Wxi.scalar_mul(Scalar {x: xi });
+        let mut temp: u256 = 0;
+        asm (rA: temp, rB: u, rC: xi, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+        let w1: u256 = 0x027a358499c5042bb4027fd7a5355d71b8c12c177494f0cad00a58f9769a2ee2u256;
+        asm (rA: temp, rB: temp, rC: w1, rD: vk.q.x) {
+          wqmm rA rB rC rD;
+        };
+
+        b1 = b1.point_add(self.proof_Wxiw.scalar_mul(Scalar { x: temp }));
+        b1 = b1.point_add(F);
+        let E_neg = G1Point {
+            x: E.x,
+            y: (vk.qf.x - E.y) % vk.qf.x
+        };
+        b1 = b1.point_add(E_neg);
+
+        // Serialize inputs for EPAR
+        let mut pairing_input: [u256; 12] = [0; 12];
+
+        // Pairing input: -A1, X2
+        pairing_input[0] = a1_neg.x;
+        pairing_input[1] = a1_neg.y;
+        // g2: [[x1, x0], [y1, y0]]
+        pairing_input[3] = vk.X2.x[0];
+        pairing_input[2] = vk.X2.x[1];
+        pairing_input[5] = vk.X2.y[0];
+        pairing_input[4] = vk.X2.y[1];
+
+        // Pairing input: B1, [1]_2
+        pairing_input[6] = b1.x;
+        pairing_input[7] = b1.y;
+        // g2: [[x1, x0], [y1, y0]]
+        pairing_input[9] = vk.G2.x[0];
+        pairing_input[8] = vk.G2.x[1];
+        pairing_input[11] = vk.G2.y[0];
+        pairing_input[10] = vk.G2.y[1];
+
+        // Perform pairing check
+        let curve_id: u32 = 0;
+        let groups_of_points: u32 = 2;
+        
+        let result: u32 = asm(rA, rB: curve_id, rC: groups_of_points, rD: pairing_input) {
+            epar rA rB rC rD;
+            rA: u32
+        };
+        
+        result != 0
     }
 }
 
@@ -709,6 +901,14 @@ fn get_test_vk() -> VerificationKey {
 }
 
 #[test]
+fn test_verification() {
+    let proof = get_test_proof();
+      let vk = get_test_vk();
+    let publicInput: u256 = 0x110d778eaf8b8ef7ac10f8ac239a14df0eb292a8d1b71340d527b26301a9ab08u256;
+    assert(proof.verify(vk, publicInput));
+}
+
+#[test]
 fn test_challenges_correct() {
   let proof = get_test_proof();
   let vk = get_test_vk();
@@ -735,27 +935,26 @@ fn test_challenges_correct() {
 fn test_calculate_lagrange() {
     let proof = get_test_proof();
     let vk = get_test_vk();
-    let zeta: u256 = u256::from(0x0d4145839d4fdb8f5fd1533b384e24940bf7114b39cdd16f163838bbaeec9e32);
+    let xi: u256 = u256::from(0x0d4145839d4fdb8f5fd1533b384e24940bf7114b39cdd16f163838bbaeec9e32);
     let w: u256 = 1;
     
     // Returns num and denom separately, since inversion has not been implemented yet
-    let (num, denom, zeta_pow_n): (u256, u256, u256) = proof.calculateLagrange(vk, zeta, w);
-    // n(zeta-1) mod q: 0x2ec0819de24e1fbb5b015a8726335497c6fe3b4428e53aed437ca9da64f185d0
+    let (num, denom, xi_pow_n): (u256, u256, u256) = proof.calculateLagrange(vk, xi, w);
+    // n(xi-1) mod q: 0x2ec0819de24e1fbb5b015a8726335497c6fe3b4428e53aed437ca9da64f185d0
     assert(denom == u256::from(0x2ec0819de24e1fbb5b015a8726335497c6fe3b4428e53aed437ca9da64f185d0));
-    // zeta^n - 1 mod q: 0x146415a35241c3305dc90bccb7aae026960aa78d380828893c63a7eb0ea81d97
+    // xi^n - 1 mod q: 0x146415a35241c3305dc90bccb7aae026960aa78d380828893c63a7eb0ea81d97
     assert(num == u256::from(0x146415a35241c3305dc90bccb7aae026960aa78d380828893c63a7eb0ea81d97));
 
     // TODO add inversion and compute final value
-    // let pEval_l1: u256 = proof.calculateLagrange(vk, zeta, w);
+    // let pEval_l1: u256 = proof.calculateLagrange(vk, xi, w);
     // let expected_pEval_l1: u256 = u256::from(0x0e403813acb2c357cb815b0cf271a6f92851f0444081051ea884eb47fa36e9dd);
     // assert(pEval_l1 == expected_pEval_l1);
-    
 }
 
-// This test fails, the Solidity code actually does something slightly different than the paper
-// should be pEval_l1*pub[0] mod q
-// Solidity code does 0-(pEval_l1*pub[0]) mod q
-// #[test]
+// The Solidity code actually does something slightly different than the paper
+// in the paper: pEval_l1*pub[0] mod q
+// Solidity code (and this impl): 0-(pEval_l1*pub[0]) mod q
+#[test]
 fn test_calculate_pi() {
     let proof = get_test_proof();
     let vk = get_test_vk();
@@ -764,10 +963,6 @@ fn test_calculate_pi() {
     let publicInput: u256 = 0x110d778eaf8b8ef7ac10f8ac239a14df0eb292a8d1b71340d527b26301a9ab08u256;
     let pEval_l1 = 0x0f54b0a27de056bddb97b2c04c514603caba86c9c0a2569d829216adfc954077u256;
     let PI = proof.calculatePI(vk, pEval_l1, publicInput);
-    // log(PI);
-    // 13846180246831597647355553071185727713542919405836854616907849828550982328331
-    // 0x1e9ca90959ca62a14e2e1eecc8d92c74a1ba05e68403dcd06b2d0bac3b95600b
-    // 16^^1e9ca90959ca62a14e2e1eecc8d92c74a1ba05e68403dcd06b2d0bac3b95600b
 
     // expected value from Solidity contract 0x11c7a56987673d886a2226c9b8a82be88679e261f5b593c0d8b4e9e7b46a9ff6
     // 8042062625007677574890852674071547375005444994579179726790354358024826167286
@@ -798,7 +993,7 @@ fn test_calculate_r0() {
     let alpha_squared: u256 = square_mod(alpha, vk.q.x);
     
     let R0 = proof.calculateR0(
-          vk,
+          vk, 
           PIz,
           pEval_l1,
           alpha,
@@ -814,9 +1009,9 @@ fn test_calculate_r0() {
 fn test_calculate_d(){
     let proof = get_test_proof();
     let vk = get_test_vk();
-    let zeta: u256 = u256::from(0x0d4145839d4fdb8f5fd1533b384e24940bf7114b39cdd16f163838bbaeec9e32);
+    let xi: u256 = u256::from(0x0d4145839d4fdb8f5fd1533b384e24940bf7114b39cdd16f163838bbaeec9e32);
     let w: u256 = 1;
-    let (num, denom, zeta_pow_n): (u256, u256, u256) = proof.calculateLagrange(vk, zeta, w);
+    let (num, denom, xi_pow_n): (u256, u256, u256) = proof.calculateLagrange(vk, xi, w);
 
     let pEval_l1 = 0x0f54b0a27de056bddb97b2c04c514603caba86c9c0a2569d829216adfc954077u256;
     let PIz = 0x11c7a56987673d886a2226c9b8a82be88679e261f5b593c0d8b4e9e7b46a9ff6u256;
@@ -831,18 +1026,91 @@ fn test_calculate_d(){
     let u: u256 = 0x1f0b89079ac8c5c8af6b1480eb3ad5661afb28ff7a4096f00422dc675d5c711au256;
 
     let D = proof.calculateD(
-          vk,
+          vk, 
           pEval_l1,
           alpha,
           alpha_squared,
           beta,
           gamma,
-          zeta,
-          zeta_pow_n,
+          xi,
+          xi_pow_n,
           v,
           u
         );
 
     assert(D.x == 0x12fe947ff97765524ee878302c1f5405173f4c0e6af173d43972bb887d554d96u256);
     assert(D.y == 0x229ba69429158abe97a0fd03ab54a54928a1d36917a5bc79937554563e16d74cu256);
+}
+
+#[test]
+fn test_calculate_f(){
+    let v: u256 = 0x168c1810dcfcb6d7bbee36e0140593e4382ca849c3d6539eaa1e2ebb84e83262u256;
+    let proof = get_test_proof();
+    let vk = get_test_vk();
+    let mut v2: u256 = 0;
+    let mut v3: u256 = 0;
+    let mut v4: u256 = 0;
+    let mut v5: u256 = 0;
+    asm (rA: v2, rB: v, rC: v, rD: vk.q.x) {
+      wqmm rA rB rC rD;
+    };
+    asm (rA: v3, rB: v2, rC: v, rD: vk.q.x) {
+      wqmm rA rB rC rD;
+    };
+    asm (rA: v4, rB: v3, rC: v, rD: vk.q.x) {
+      wqmm rA rB rC rD;
+    };
+    asm (rA: v5, rB: v4, rC: v, rD: vk.q.x) {
+      wqmm rA rB rC rD;
+    };
+    let v_scalar = Scalar { x: v };
+    let v2_scalar = Scalar { x: v2 };
+    let v3_scalar = Scalar { x: v3 };
+    let v4_scalar = Scalar { x: v4 };
+    let v5_scalar = Scalar { x: v5 };
+    
+    let Dx: u256 = 0x12fe947ff97765524ee878302c1f5405173f4c0e6af173d43972bb887d554d96u256;
+    let Dy: u256 = 0x229ba69429158abe97a0fd03ab54a54928a1d36917a5bc79937554563e16d74cu256;
+    let D: G1Point = G1Point { x: Dx, y: Dy };
+    let F: G1Point = proof.calculateF(vk, v_scalar, v2_scalar, v3_scalar, v4_scalar, v5_scalar, D);
+    
+    assert(F.x == 0x290426106c4903d8adddc78c613e8b3cc9f8e19fc8c6f97529a36dacff21f1fbu256);
+    assert(F.y == 0x2e4ca5ddd8da31b57ebe36cdcd98e9910e6faeb5c478cf8ec7042d70b9e05772u256);
+}
+
+#[test]
+fn test_calculate_e(){
+    let u: u256 = 0x1f0b89079ac8c5c8af6b1480eb3ad5661afb28ff7a4096f00422dc675d5c711au256;
+    let v: u256 = 0x168c1810dcfcb6d7bbee36e0140593e4382ca849c3d6539eaa1e2ebb84e83262u256;
+    let proof = get_test_proof();
+    let vk = get_test_vk();
+    let mut v2: u256 = 0;
+    let mut v3: u256 = 0;
+    let mut v4: u256 = 0;
+    let mut v5: u256 = 0;
+    asm (rA: v2, rB: v, rC: v, rD: vk.q.x) {
+      wqmm rA rB rC rD;
+    };
+    asm (rA: v3, rB: v2, rC: v, rD: vk.q.x) {
+      wqmm rA rB rC rD;
+    };
+    asm (rA: v4, rB: v3, rC: v, rD: vk.q.x) {
+      wqmm rA rB rC rD;
+    };
+    asm (rA: v5, rB: v4, rC: v, rD: vk.q.x) {
+      wqmm rA rB rC rD;
+    };
+    let u_scalar = Scalar { x: u };
+    let v_scalar = Scalar { x: v };
+    let v2_scalar = Scalar { x: v2 };
+    let v3_scalar = Scalar { x: v3 };
+    let v4_scalar = Scalar { x: v4 };
+    let v5_scalar = Scalar { x: v5 };
+    
+    let r0: u256 = 0x250144c24fc35df3f70f144497bea4b7efebe7f0d1d73794af958bca5eaba559u256;
+
+    let E: G1Point = proof.calculateE(vk, r0, u_scalar, v_scalar, v2_scalar, v3_scalar, v4_scalar, v5_scalar);
+    
+    assert(E.x == 0x0dbe940aba2194573041b5fe36a10418ee90345f22573da4f38c6e542f9ff07cu256);
+    assert(E.y == 0xbc12210fdfd6c6a8846bae29d8daf0e444ad5d91f65276628ba3157a8b3b4d6u256);
 }
